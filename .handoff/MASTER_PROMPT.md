@@ -52,6 +52,23 @@ pull request they can merge and deploy from their phone. They want it live as so
   are the chat server items whose tests were not written (srv-01 to srv-13 code is in, tests missing; srv-09 docs
   missing) and the routing work (ask-02 to 05, ask-11, ask-16, live problems; plans in the last fixer's notes).
 
+## Urgent: the academic year trap (reported live, 2026-11-14)
+
+On the live server the SAO created AY 2028-2029 first. The first year ever created is made current automatically
+(`AcademicYearController::store`: `is_current => ! AcademicYear::exists()`), its semesters start in 2028, and
+`AcademicSemesterController::activate` refuses a semester whose start date is in the future. The year cannot be
+removed either: `destroy` refuses a current year, and `isInUse` counts any semester (even one that never started), so
+the label and the delete are both locked. The SAO is stuck with no active semester, so registration cannot start.
+
+The no-code way out, in the app as the SAO on Setup and records > Academic years: delete the 2028-2029 semesters
+that never started; add AY 2026-2027 (dates around today); Make current on 2026-2027 (allowed while no semester is
+active anywhere); delete AY 2028-2029; add a semester to 2026-2027 that started on or before today and Activate it.
+
+The code fix (follow-up release): a year whose semesters never became active and that nothing references can always
+be removed by the SAO, current or not (afterwards no year is current until one is made current or another is added);
+a semester that never started does not count as "in use" for editing the year's label and dates; and when Activate is
+refused because the semester starts in the future, the page says so up front and offers Edit dates. Tests for each.
+
 ## What is left, in order
 
 1. **See what the last session left mid-flight.** Three jobs were still running when it ended and may be finished,
