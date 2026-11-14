@@ -44,6 +44,14 @@ pull request they can merge and deploy from their phone. They want it live as so
   the small client pass (`review/client-pass.json`), and the Opus security review of actions (its findings go to
   `review/actions.json`). Check each in the tree before redoing it.
 
+- **Release cut (do this first in a new session):** the first release is the fork branch `claude/ask-ai-release`
+  (commit `c6833c3`): everything up to checkpoint `c56f963`, minus `.handoff/`, plus the removal of the
+  `invite_department_head` action (Opus review finding act-01: the single-use invitation link was stored in chat
+  history and sent to the model). This working branch still has that action: port commit `c6833c3` here before any
+  follow-up PR. The other actions findings (act-02 to act-10 in `review/actions.json`) are open for the follow-up, as
+  are the chat server items whose tests were not written (srv-01 to srv-13 code is in, tests missing; srv-09 docs
+  missing) and the routing work (ask-02 to 05, ask-11, ask-16, live problems; plans in the last fixer's notes).
+
 ## What is left, in order
 
 1. **See what the last session left mid-flight.** Three jobs were still running when it ended and may be finished,

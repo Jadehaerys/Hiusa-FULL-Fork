@@ -1,0 +1,102 @@
+[
+  {
+    "id": "act-01",
+    "title": "The Department Head invitation link is saved in plain text in the chat history and sent to the language model",
+    "severity": "high",
+    "file": "server/app/Services/Ai/AskAiActions.php",
+    "line": 336,
+    "evidence": "AskAiActions.php:332-336 `$link = (string) data_get($json, 'magic_link', ''); ... \"The invitation link is ready. It works once and expires in 48 hours, so copy it now and send it to the Department Head: {$link}\"`. AskAiActionController::confirm stores it twice: `$this->store($claimed, $outcome['message'], ...)` (ai_messages.content) and `$action['result'] = $done ? ['message' => $outcome['message'], ...]` (ai_messages.payload). DepartmentHeadInvitationController::createInvitation deliberately keeps only `'token_hash' => hash('sha256', $plainToken)`, and the form keeps the link only in component state (DepartmentHeadDialogs.jsx:118). AskAiChatService::history() maps every completed assistant message to `['role' => $message->role, 'content' => mb_substr($message->content, 0, self::HISTORY_CHARS)]` and modelMessages() sends it to the model. Verified on the live copy: SAO 990001 confirmed message 212 (Review Test College); the stored content contains `/accept-invitation?token=` and GET /api/ai/assistant/conversations?search=accept-invitation returns that conversation.",
+    "impact": "The single-use 64-character token that creates a Department Head account (approval power over every organization in the college) is kept indefinitely in ai_messages and therefore in every mysqldump under /var/backups/hiusa, matches conversation search, comes back from GET /conversations/{id}, and is sent to Anthropic or Groq on the SAO's next message in that conversation. Anyone holding a dump, the provider's request logs or the SAO's open session within the 48 hours can claim the dean account before the real dean. The invitation table hashes the token precisely so this cannot happen. Separately, the unbroken URL inside the done card's <p> (ActionCard.jsx:173) overflows the card at 390px.",
+    "fix": "Keep the link out of everything stored. In inviteDepartmentHead()'s result closure return the link under its own key (e.g. 'secret' => $link) and a message without it (\"The invitation link was created. Copy it now; it is shown only once.\"). Have execute() pass 'secret' through, and in AskAiActionController::confirm add it only to the HTTP response (e.g. `response()->json(['message' => $this->chat->presentMessage(...), 'secret_link' => $outcome['secret'] ?? null])`), never to store(), the payload or recordAction(). In ActionCard show secret_link from the confirm response in a read-only Input with a Copy link button, as DepartmentHeadDialogs.jsx:117-120 does (this also fixes the 390px overflow). Add a test that after confirming invite_department_head no ai_messages row contains 'token=' and the next chat turn's model messages do not contain it."
+  },
+  {
+    "id": "act-02",
+    "title": "Audit rows for records made through Ask AI record the reverse proxy's address, not the person's",
+    "severity": "medium",
+    "file": "server/app/Services/Ai/AskAiActions.php",
+    "line": 886,
+    "evidence": "`$server = ['CONTENT_TYPE' => 'application/json', 'HTTP_ACCEPT' => 'application/json', 'REMOTE_ADDR' => $original->server('REMOTE_ADDR', '127.0.0.1')];` and lines 887-891 copy only Authorization, X-Academic-Semester and User-Agent, not X-Forwarded-For. Production runs with `TRUSTED_PROXIES=172.28.0.0/24` (server/.env.production.example:7, scripts/setup-ec2.sh:130), so the outer request's ip() comes from X-Forwarded-For while its raw REMOTE_ADDR is Caddy's container address. Every target route audits with `'ip_address' => $request->ip(),` (TaskController.php:211, GrievanceController grievance_filed row, BudgetController recordBudgetAudit, ApplicantGrantController audit, CollegeController audit, DepartmentHeadInvitationController).",
+    "impact": "Every task_delegated, grievance_filed, budget created, applicant_grant_created, college created and department_head_invited audit row written through Ask AI stores 172.28.0.x for every person. The one feature that writes records on someone's behalf is the one whose audit trail cannot be traced to a client, contrary to the contract's promise that the audit applies exactly as for the form.",
+    "fix": "Pass the already-resolved client address: `'REMOTE_ADDR' => (string) ($original->ip() ?? '127.0.0.1')`, and keep not copying X-Forwarded-For; with TRUSTED_PROXIES=172.28.0.0/24 the inner request then reports that address. Add a test that trusts a proxy (Request::setTrustedProxies(['127.0.0.1'], Request::HEADER_X_FORWARDED_FOR)), sends X-Forwarded-For: 203.0.113.9 on the confirm call for create_task, and asserts the task_delegated AuditLog ip_address is 203.0.113.9."
+  },
+  {
+    "id": "act-03",
+    "title": "The applicant list is cut to the first 300 students before eligibility, and the confirm re-checks against that cut list",
+    "severity": "medium",
+    "file": "server/app/Services/Ai/AskAiActions.php",
+    "line": 395,
+    "evidence": "Line 395 `$listed = $matches->concat($students()->orderBy('last_name')->orderBy('first_name')->limit(self::STUDENT_OPTION_LIMIT)->get(...))` runs before lines 401-402 `->reject(fn (User $student) => isset($blocked[(int) $student->school_id]) || in_array(..., $open, true))`. normalise() line 844 `$this->clean($field, $submitted[$name] ?? null, $this->optionsOf($field, $user))` calls applicantOptions() with the default `$message = ''`, so `$named === []`, the name matches are dropped and only the first 300 by surname are accepted. refuse() and store() in AskAiActionController rebuild the card's options the same way (`$this->actions->presentFields($definition, $user, $values)`).",
+    "impact": "In a college with more than 300 student accounts (most of whom already belong to a program organization and are rejected after the cut), the dean's card offers few or no students and never anyone whose surname sorts after the 300th. Naming the student (\"let Maria Zamora apply\") finds her at proposal through the name match, but the confirm answers \"Choose one of the listed options.\" and the refused card drops her from the list, so the dean can never complete the action for her. The seeded colleges are small, so neither the tests nor the demo show it (dean 940001's card currently lists 0 students).",
+    "fix": "Validate the submitted value directly instead of against a truncated list: give the school_id field a `check` callable that applies ApplicantGrantController's rule to that one school_id (active STUDENT profile in an organization of the dean's college, active account, no blocking organization, no open grant) and have normalise() use it in place of the option lookup when present. Apply the limit after eligibility (query with whereNotExists on active student-organization memberships and open grants, then limit 300), and when re-presenting fields in refuse()/store() keep the selected student's option (or pass the stored user message) so the choice stays listed. Add a test with 301 students where the only eligible one sorts last."
+  },
+  {
+    "id": "act-04",
+    "title": "The dean's office staff are offered the applicant card that the dean-only gate always refuses",
+    "severity": "low",
+    "file": "server/app/Services/Ai/AskAiActions.php",
+    "line": 69,
+    "evidence": "`return $definition !== null && in_array($user->role, $definition['roles'], true) ? $definition : null;` with allow_applicant `'roles' => ['DEPARTMENT_HEAD']` (line 265). Office staff read as DEPARTMENT_HEAD (EnsureRole docblock: \"Office staff take the dean's role on every request\"), but EnsureRole::DEAN_ONLY lists 'POST api/college/applicant-grants' and 'GET api/college/applicant-grants'. AskAiActionsTest::test_the_deans_staff_are_refused_by_the_dean_only_gate asserts the staff member gets the card and then \"I could not do that. Only the dean can do this.\"",
+    "impact": "A college secretary who types \"let Maria Santos apply for a new organization\" gets a card listing up to 350 students with names and school IDs, already filtered by who holds an open grant (state that only the dean-only GET college/applicant-grants reveals), fills it in and is always refused. Every staff member hits a dead end the form never shows them.",
+    "fix": "In definitionFor() (and so titlesFor()), return null when `$user->isCollegeOfficeStaff()` and the definition's route key is dean-only: build `$definition['route'][0].' '.ltrim($definition['route'][1], '/')` and check `in_array(..., EnsureRole::DEAN_ONLY, true)`. Change the staff test to assert that no action is proposed."
+  },
+  {
+    "id": "act-05",
+    "title": "A card interrupted while running stays 'confirming' forever, and a throttle refusal burns the card",
+    "severity": "low",
+    "file": "server/app/Http/Controllers/AskAiActionController.php",
+    "line": 119,
+    "evidence": "claim(): `$payload['action']['status'] = 'confirming'; $locked->update(['payload' => $payload]);`. Only store() and refuse() move it on; the next claim answers 'This request is no longer waiting for confirmation.' for any status but awaiting_confirmation (line 108), and the expiry check (line 112) is only reached for awaiting cards. Client: actionState.js:17 `return action.status === 'awaiting_confirmation' ? messages[i].id ?? null : null;` so a confirming card renders read only with \"A newer request replaced this one.\" (ActionCard.jsx:218). AskAiActions.php:924 maps an inner 429 from the target route's throttle:api-write to outcome 'failed'.",
+    "impact": "If the PHP worker dies or hits its time limit inside execute() (TaskController calls the AI service and the explanation model, GrievanceController calls the classifier), the card is stuck: confirm and cancel answer 409 forever, it never expires, and the person is told a newer request replaced it, with no hint whether the record was made. A person who reloads during a slow confirm sees the same wrong line. A 429 from the inner route marks the card failed although nothing ran.",
+    "fix": "Save `confirming_at` in claim(); there, treat a 'confirming' card older than 2 minutes as 'failed' with content \"I could not tell whether this went through. Check the page before trying again.\" and answer 409 with that sentence. In actionState/ActionCard show 'confirming' as its own line (\"Working on it. Check the page if this does not change.\"). In execute(), map 429 to outcome 'invalid' with the route's message under '_' so the card goes back to awaiting_confirmation."
+  },
+  {
+    "id": "act-06",
+    "title": "Whether a message was typed is taken from each request and never stored, so a regenerate can turn a link message into a card",
+    "severity": "low",
+    "file": "server/app/Http/Controllers/AskAiController.php",
+    "line": 88,
+    "evidence": "`$source = $validated['source'] ?? 'typed';`. AskAiChatService::respond() on regenerate reuses the last stored user message (`$userMessage = $conversation->messages()->reorder()->where('role', 'user')->orderByDesc('id')->first();`), which is created without its source (`AiMessage::create(['conversation_id' => ..., 'role' => 'user', 'content' => (string) $text, 'status' => 'completed', ...])`), and then calls `$this->actions->propose($user, $conversation, $userMessage, $source, $emit)` with the regenerate request's source. assertRegenerable() now refuses only when the old answer already carries an action.",
+    "impact": "Rule 1 holds only because today's client sends 'link' when regenerating a message it did not see typed (typedIdsRef); the server cannot tell. A regenerate request with source 'typed', or with source omitted, on a message that arrived through a ?q= link gets an action card for text someone else chose, as does any future client path that forgets the field.",
+    "fix": "Record the source on the user message at AiMessage::create (payload ['source' => $source]) and on regenerate use the stored value, ignoring the request's (treat a stored null as 'link'). Default an absent source to 'link' in AskAiController, since the client always sends it. Add a test: send a message with source 'link', regenerate with source 'typed', assert no payload.action."
+  },
+  {
+    "id": "act-07",
+    "title": "Information requests that contain an action verb and noun anywhere get a card instead of an answer",
+    "severity": "low",
+    "file": "server/app/Services/Ai/AskAiActions.php",
+    "line": 440,
+    "evidence": "`$gap = $nounStart > $verbEnd ? $nounStart - $verbEnd : ($verbStart - $nounEnd) + 3; $distance = min($distance, $gap);` then `if ($distance < $bestDistance) { $best = $key; ...}` with no upper bound, and isQuestion() only checks the first one or two tokens and six how/steps phrases. respond() calls propose() before answerFromRecords().",
+    "impact": "Typed questions phrased as statements lose their records answer: an Admin's \"List the events we plan to host next month\" (verbs plan/host, noun events, gap 5) becomes a create_event card, \"Summarize the budgets we still need to submit\" (gap 8) a propose_budget card, and a student's \"My friend wants to file a complaint, what should she do\" a file_grievance card for themselves. The person has to cancel and rephrase.",
+    "fix": "Accept a match only when the noun follows the verb within 3 tokens (or the verb starts the sentence after an optional please/pls/can you/i want to), and treat a message as a question when it contains a question word (what, which, how, list, show, summarize, tell) anywhere or ends with '?'. Add these three sentences to test_called_and_named_work_without_quotes_and_a_question_is_not_a_request."
+  },
+  {
+    "id": "act-08",
+    "title": "The task card offers officers at their task limit, from a fourth copy of the delegation eligibility rule",
+    "severity": "low",
+    "file": "server/app/Services/Ai/AskAiActions.php",
+    "line": 359,
+    "evidence": "eligibleOfficers(): `->filter(fn (User $officer) => $delegation->accountIsActive($officer) && trim((string) $officer->position_title) !== '' && $delegation->canonicalPosition($officer->position_title, $positions) !== null)` copies TaskController::eligibleOfficers, but TaskController::recommendOfficer (lines 738-740) then keeps only `$this->officerPayload($officer, $request)['is_available']` (active tasks below services.hiusa_ai.task_max_active_tasks) and store() refuses anyone outside those rankings (lines 152-156).",
+    "impact": "The Assign to list includes officers already at the active-task cap. Choosing one, or the one the model pre-filled from \"for Ana\", comes back as \"Choose an eligible officer from the recommendation.\" The card never shows the recommendation the form shows, and CLAUDE.md requires the delegation rules to change together in their existing places; this adds another.",
+    "fix": "Build the options from the delegation result instead of a copy: move recommendOfficer's eligibility and ranking into TaskDelegationService (which TaskController already calls), list only the ranked available officers in ranking order with the recommended one labelled \"(recommended)\", and pre-select it when the message names nobody."
+  },
+  {
+    "id": "act-09",
+    "title": "When a card expires the form and everything typed into it disappear",
+    "severity": "low",
+    "file": "client/src/components/ai/ActionCard.jsx",
+    "line": 183,
+    "evidence": "Server: `'expires_at' => now()->addMinutes(self::EXPIRES_MINUTES)->toIso8601String()` is set once at proposal (AskAiActions.php:555) and refuse() never moves it. Client: useExpiry() re-renders at expires_at, effectiveStatus() turns it into 'expired', and `if (status === 'cancelled' || status === 'failed' || status === 'expired') { ... return <p className={`mt-3 ${NOTE_CLASS}`}>{line}</p>; }` replaces the form.",
+    "impact": "A student who takes more than 30 minutes from the card's appearance (including time spent fixing a 422) to write a grievance description of up to 5000 characters sees the form replaced by \"This request expired. Ask again to get a fresh one.\" mid-typing, and the text is gone with no way to copy it.",
+    "fix": "Measure expiry from the last activity: set expires_at to now()+30 minutes again in refuse(). On the client, when the card expires keep the fields rendered read only with the values the person entered, plus a Copy details button built from those values, instead of replacing the form with one line."
+  },
+  {
+    "id": "act-10",
+    "title": "Tests labelled as proving the inner middleware partly test the outer route, and the semester header and period gate are untested",
+    "severity": "low",
+    "file": "server/tests/Feature/AskAiActionsTest.php",
+    "line": 684,
+    "evidence": "test_an_organization_archived_after_the_proposal_is_refused_and_nothing_is_created sits under \"The internal request really runs the route's middleware\" but asserts `->assertForbidden()` on the confirm call itself: the outer account.profile refuses the inactive profile before execute() runs. No test sends X-Academic-Semester on a confirm and checks the record's academic_semester_id, none covers the inner period.writable on POST /events and /tasks, and every test uses Sanctum::actingAs, so the Authorization forwarding at AskAiActions.php:887-891 is never exercised.",
+    "impact": "Dropping the semester header from the forwarded list, or a change that lets the inner request skip period.writable, would pass the suite while Ask AI files events and tasks into the active semester instead of the selected planning period, or into a closed school year.",
+    "fix": "Add: (1) with an active and an upcoming semester, confirm create_event with header X-Academic-Semester set to the upcoming id and assert Event::sole()->academic_semester_id equals it; (2) with the selected semester completed, confirm create_task and assert status failed, the content contains EnsurePeriodWritable::CLOSED and Task::count() is 0; (3) one test that signs in with a real token (createToken, withHeader('Authorization', 'Bearer ...')) rather than actingAs. Move the archived-organization test to the confirm/cancel section."
+  }
+]

@@ -930,3 +930,43 @@ class AskAiChatTest extends TestCase
         $this->assertSame(AiMemory::LIMIT, AiMemory::ownedBy($admin)->count());
     }
 }
+
+trait SilentChatBehavior
+{
+    public int $calls = 0;
+
+    public ?float $budget = null;
+
+    private ?float $pending = null;
+
+    public function __construct(private readonly int $silentMicroseconds = 0) {}
+
+    public function withTimeBudget(?float $seconds): void
+    {
+        $this->pending = $seconds;
+    }
+
+    public function lastCallUnreachable(): bool
+    {
+        return false;
+    }
+
+    public function converse(string $instructions, array $messages, int $maxOutputTokens = 1400, ?callable $onEvent = null): ?array
+    {
+        $this->calls++;
+        $this->budget = $this->pending;
+        usleep($this->silentMicroseconds);
+
+        return null;
+    }
+}
+
+class SilentChatProbe extends \App\Services\Ai\ClaudeMessagesService
+{
+    use SilentChatBehavior;
+}
+
+class SilentChatGroqProbe extends \App\Services\GroqResponsesService
+{
+    use SilentChatBehavior;
+}

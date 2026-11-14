@@ -23,6 +23,8 @@ class AskAiChatFakeGenerator implements TextGenerator
         public ?string $model = 'claude-test',
         public bool $fails = false,
         public bool $silentReasoning = false,
+        public array $reasoningParts = [],
+        public bool $failAfterText = false,
     ) {}
 
     public function generate(string $instructions, string $input, int $maxOutputTokens = 400, float $temperature = 0.2): ?array
@@ -47,6 +49,12 @@ class AskAiChatFakeGenerator implements TextGenerator
             $onEvent('reasoning', $this->reasoning);
         }
 
+        foreach ($this->reasoningParts as $part) {
+            if ($onEvent !== null) {
+                $onEvent('reasoning', $part);
+            }
+        }
+
         foreach ($this->chunks as $index => $chunk) {
             if ($onEvent !== null) {
                 $onEvent('text', $chunk);
@@ -54,6 +62,10 @@ class AskAiChatFakeGenerator implements TextGenerator
             if ($this->afterChunk !== null) {
                 ($this->afterChunk)($index);
             }
+        }
+
+        if ($this->failAfterText) {
+            return null;
         }
 
         return ['text' => implode('', $this->chunks), 'reasoning' => $this->reasoning, 'model' => (string) $this->model, 'response_id' => null];
